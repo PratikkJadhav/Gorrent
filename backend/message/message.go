@@ -45,7 +45,7 @@ func FormatHaveMessage(index int) *Message {
 
 //This function parses a piece message and copies its payload into a buffer
 
-func ParsePieceMessage(index int, buf []byte, msg *Message) (int, error) {
+func ParsePiece(index int, buf []byte, msg *Message) (int, error) {
 	if msg.ID != MsgPiece {
 		return 0, fmt.Errorf("Expected piece (ID %d) , got ID %d", MsgPiece, msg.ID)
 	}

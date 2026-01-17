@@ -59,7 +59,7 @@ func (t *torrentfile) DownloadToFile(path string) error {
 		Peers:       peers,
 		PeerID:      peerID,
 		InfoHash:    t.InfoHash,
-		PieceHases:  t.PieceHash,
+		PieceHashes: t.PieceHash,
 		PieceLength: t.PieceLength,
 		Length:      t.Length,
 		Name:        t.Name,
