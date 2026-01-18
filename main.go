@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/PratikkJadhav/Gorrent/backend/torrentfile"
+	torrentfile "github.com/PratikkJadhav/Gorrent/backend/torrentfile"
 )
 
 func main() {

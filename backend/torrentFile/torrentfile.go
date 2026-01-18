@@ -13,15 +13,6 @@ import (
 
 const port uint16 = 6881
 
-type torrentfile struct {
-	Announce    string
-	InfoHash    [20]byte
-	PieceHash   [][20]byte
-	PieceLength int
-	Length      int
-	Name        string
-}
-
 type TorrentFile struct {
 	Announce    string
 	InfoHash    [20]byte
@@ -43,7 +34,7 @@ type bencodeTorrent struct {
 	Info     bencodeInfo `bencode:"info"`
 }
 
-func (t *torrentfile) DownloadToFile(path string) error {
+func (t *TorrentFile) DownloadToFile(path string) error {
 	var peerID [20]byte
 	_, err := rand.Read(peerID[:])
 	if err != nil {
@@ -59,7 +50,7 @@ func (t *torrentfile) DownloadToFile(path string) error {
 		Peers:       peers,
 		PeerID:      peerID,
 		InfoHash:    t.InfoHash,
-		PieceHashes: t.PieceHash,
+		PieceHashes: t.PieceHashes,
 		PieceLength: t.PieceLength,
 		Length:      t.Length,
 		Name:        t.Name,
