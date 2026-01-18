@@ -94,7 +94,7 @@ func attemptDownloadedPiece(c *client.Client, pw *pieceWork) ([]byte, error) {
 		buf:    make([]byte, pw.length),
 	}
 
-	c.Conn.SetDeadLine(time.Now().Add(30 * time.Second))
+	c.Conn.SetDeadline(time.Now().Add(30 * time.Second))
 	defer c.Conn.SetDeadline(time.Time{})
 
 	for state.downloaded < pw.length {
@@ -146,9 +146,6 @@ func (t *Torrent) startDownloadWorker(peer peers.Peer, workQueue chan *pieceWork
 
 	defer c.Conn.Close()
 	log.Printf("Completed handshake with %s\n", peer.IP)
-
-	c.SendUnchoke()
-	c.SendInterested()
 
 	for pw := range workQueue {
 		if !c.Bitfield.HasPiece(pw.index) {
