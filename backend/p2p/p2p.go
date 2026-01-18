@@ -136,7 +136,10 @@ func checkIntegrity(pw *pieceWork, buf []byte) error {
 	return nil
 }
 
-func (t *Torrent) startDownloadWorker(peer peers.Peer, workQueue chan *pieceWork, results chan *pieceResult) {
+func (t *Torrent) startDownloadWorker(peer peers.Peer, workQueue chan *pieceWork, results chan *pieceResult, workerdone chan struct{}) {
+	defer func() {
+		workerdone <- struct{}{}
+	}()
 
 	c, err := client.New(peer, t.PeerID, t.InfoHash)
 	if err != nil {
@@ -191,10 +194,12 @@ func (t *Torrent) calculatePieceSize(index int) int {
 }
 
 func (t *Torrent) Download() ([]byte, error) {
+
 	log.Printf("Starting download for", t.Name)
 
 	workQueue := make(chan *pieceWork, len(t.PieceHashes))
 	results := make(chan *pieceResult)
+	workerdone := make(chan struct{})
 
 	for index, hash := range t.PieceHashes {
 		length := t.calculatePieceSize(index)
@@ -202,21 +207,31 @@ func (t *Torrent) Download() ([]byte, error) {
 	}
 
 	for _, peer := range t.Peers {
-		go t.startDownloadWorker(peer, workQueue, results)
+		go t.startDownloadWorker(peer, workQueue, results, workerdone)
 	}
 
 	buf := make([]byte, t.Length)
 	donePieces := 0
 
-	for donePieces < len(t.PieceHashes) {
-		res := <-results
-		begin, end := t.calculateBoundForPiece(res.index)
-		copy(buf[begin:end], res.buf)
-		donePieces++
+	activeWorkers := len(t.Peers)
 
-		percent := float64(donePieces) / float64(len(t.PieceHashes)) * 100
-		numWorkers := runtime.NumGoroutine() - 1
-		log.Printf("(%0.2f%%) Downloaded piece #%d from %d peers\n", percent, res.index, numWorkers)
+	for donePieces < len(t.PieceHashes) && activeWorkers > 0 {
+		select {
+		case res := <-results:
+			begin, end := t.calculateBoundForPiece(res.index)
+			copy(buf[begin:end], res.buf)
+			donePieces++
+			percent := float64(donePieces) / float64(len(t.PieceHashes)) * 100
+			numWorkers := runtime.NumGoroutine() - 1
+			log.Printf("(%0.2f%%) Downloaded piece #%d from %d peers\n", percent, res.index, numWorkers)
+		case <-workerdone:
+			activeWorkers--
+			log.Printf("Worker exited, remaining: %d\n", activeWorkers)
+		}
+	}
+
+	if donePieces < len(t.PieceHashes) {
+		return nil, fmt.Errorf("download failed: no active peers left")
 	}
 
 	close(workQueue)
