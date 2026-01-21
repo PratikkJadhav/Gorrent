@@ -136,46 +136,6 @@ func checkIntegrity(pw *pieceWork, buf []byte) error {
 	return nil
 }
 
-func (t *Torrent) startDownloadWorker(peer peers.Peer, workQueue chan *pieceWork, results chan *pieceResult, workerdone chan struct{}) {
-	defer func() {
-		workerdone <- struct{}{}
-	}()
-
-	c, err := client.New(peer, t.PeerID, t.InfoHash)
-	if err != nil {
-		log.Printf("Could not handshake with %s. Disconnecting\n", peer.IP)
-		return
-	}
-
-	defer c.Conn.Close()
-	log.Printf("Completed handshake with %s\n", peer.IP)
-
-	for pw := range workQueue {
-		if !c.Bitfield.HasPiece(pw.index) {
-			workQueue <- pw
-			continue
-		}
-
-		buf, err := attemptDownloadedPiece(c, pw)
-		if err != nil {
-			log.Printf("Exiting", err)
-			workQueue <- pw
-			return
-		}
-
-		err = checkIntegrity(pw, buf)
-
-		if err != nil {
-			log.Printf("Piece #%d failed integrity check\n", pw.index)
-			workQueue <- pw
-			continue
-		}
-
-		c.SendHave(pw.index)
-		results <- &pieceResult{pw.index, buf}
-	}
-}
-
 func (t *Torrent) calculateBoundForPiece(index int) (begin int, end int) {
 
 	begin = index * t.PieceLength
@@ -199,23 +159,39 @@ func (t *Torrent) Download() ([]byte, error) {
 
 	workQueue := make(chan *pieceWork, len(t.PieceHashes))
 	results := make(chan *pieceResult)
-	workerdone := make(chan struct{})
 
 	for index, hash := range t.PieceHashes {
 		length := t.calculatePieceSize(index)
 		workQueue <- &pieceWork{index, hash, length}
 	}
 
-	for _, peer := range t.Peers {
-		go t.startDownloadWorker(peer, workQueue, results, workerdone)
+	for index, hash := range t.PieceHashes {
+		length := t.calculatePieceSize(index)
+		workQueue <- &pieceWork{index, hash, length}
+	}
+
+	peerQueue := make(chan *ManagedPeer, len(t.Peers))
+	for _, p := range t.Peers {
+		peerQueue <- &ManagedPeer{
+			Peer:  p,
+			State: PeerNew,
+		}
+	}
+
+	const MaxWorkers = 5
+	workerDone := make(chan struct{})
+
+	for i := 0; i < MaxWorkers; i++ {
+		go t.worker(peerQueue, workQueue, results, workerDone)
 	}
 
 	buf := make([]byte, t.Length)
 	donePieces := 0
+	activeWorkers := MaxWorkers
+	// badPeers := 0
+	// totalPeers := len(t.Peers)
 
-	activeWorkers := len(t.Peers)
-
-	for donePieces < len(t.PieceHashes) && activeWorkers > 0 {
+	for donePieces < len(t.PieceHashes) {
 		select {
 		case res := <-results:
 			begin, end := t.calculateBoundForPiece(res.index)
@@ -224,17 +200,45 @@ func (t *Torrent) Download() ([]byte, error) {
 			percent := float64(donePieces) / float64(len(t.PieceHashes)) * 100
 			numWorkers := runtime.NumGoroutine() - 1
 			log.Printf("(%0.2f%%) Downloaded piece #%d from %d peers\n", percent, res.index, numWorkers)
-		case <-workerdone:
+		case <-workerDone:
 			activeWorkers--
 			log.Printf("Worker exited, remaining: %d\n", activeWorkers)
-		}
-	}
 
-	if donePieces < len(t.PieceHashes) {
-		return nil, fmt.Errorf("download failed: no active peers left")
+			if activeWorkers == 0 {
+				return nil, fmt.Errorf("Download failed: no active peers left")
+			}
+		}
 	}
 
 	close(workQueue)
 
 	return buf, nil
+}
+
+func (t *Torrent) downloadWithClient(
+	c *client.Client, workQueue chan *pieceWork, results chan *pieceResult,
+) error {
+	for pw := range workQueue {
+		if !c.Bitfield.HasPiece(pw.index) {
+			workQueue <- pw
+			continue
+		}
+
+		buf, err := attemptDownloadedPiece(c, pw)
+		if err != nil {
+			workQueue <- pw
+			return err
+		}
+
+		err = checkIntegrity(pw, buf)
+		if err != nil {
+			workQueue <- pw
+			continue
+		}
+
+		c.SendHave(pw.index)
+		results <- &pieceResult{pw.index, buf}
+	}
+
+	return nil
 }
