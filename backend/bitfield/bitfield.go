@@ -30,3 +30,7 @@ func (bf Bitfield) SetPiece(index int) {
 	//1<<uint() creates bit mask
 	//|= (OR) set bit to 1 ( compares bf[byteIndex] and 1<<uint() and sets 1 if any one of them contains 1 , like if I already have a  piece then set the piece to 1 or if I just got it from another user then also set it to 1)
 }
+
+func New(numPieces int) Bitfield {
+	return make(Bitfield, (numPieces+7)/8)
+}

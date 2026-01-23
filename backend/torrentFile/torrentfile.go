@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/PratikkJadhav/Gorrent/backend/p2p"
@@ -14,12 +15,13 @@ import (
 const port uint16 = 6881
 
 type TorrentFile struct {
-	Announce    string
-	InfoHash    [20]byte
-	PieceHashes [][20]byte
-	PieceLength int
-	Length      int
-	Name        string
+	Announce     string
+	AnnounceList [][]string
+	InfoHash     [20]byte
+	PieceHashes  [][20]byte
+	PieceLength  int
+	Length       int
+	Name         string
 }
 
 type bencodeInfo struct {
@@ -30,8 +32,9 @@ type bencodeInfo struct {
 }
 
 type bencodeTorrent struct {
-	Announce string      `bencode:"announce"`
-	Info     bencodeInfo `bencode:"info"`
+	Announce     string      `bencode:"announce"`
+	AnnounceList [][]string  `bencode:"announce-list"`
+	Info         bencodeInfo `bencode:"info"`
 }
 
 func (t *TorrentFile) DownloadToFile(path string) error {
@@ -41,9 +44,10 @@ func (t *TorrentFile) DownloadToFile(path string) error {
 		return err
 	}
 
-	peers, err := t.requestPeers(peerID, port)
+	peers, err := t.requestPeersFromTrackers(peerID, port)
 	if err != nil {
-		return err
+		log.Printf("tracker announce failed: %v\n", err)
+		peers = nil
 	}
 
 	torrent := p2p.Torrent{
@@ -133,12 +137,13 @@ func (bto *bencodeTorrent) toTorrentFile() (TorrentFile, error) {
 	}
 
 	t := TorrentFile{
-		Announce:    bto.Announce,
-		InfoHash:    infoHash,
-		PieceHashes: pieceHashes,
-		PieceLength: bto.Info.PieceLength,
-		Length:      bto.Info.Length,
-		Name:        bto.Info.Name,
+		Announce:     bto.Announce,
+		AnnounceList: bto.AnnounceList,
+		InfoHash:     infoHash,
+		PieceHashes:  pieceHashes,
+		PieceLength:  bto.Info.PieceLength,
+		Length:       bto.Info.Length,
+		Name:         bto.Info.Name,
 	}
 
 	return t, nil

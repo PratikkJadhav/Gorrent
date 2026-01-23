@@ -11,10 +11,10 @@ import (
 	"github.com/PratikkJadhav/Gorrent/backend/client"
 	"github.com/PratikkJadhav/Gorrent/backend/message"
 	"github.com/PratikkJadhav/Gorrent/backend/peers"
+	"github.com/PratikkJadhav/Gorrent/backend/piece"
 )
 
 const MaxBacklog = 5
-
 const MaxBlockSize = 16384
 
 type Torrent struct {
@@ -25,6 +25,11 @@ type Torrent struct {
 	PieceLength int
 	Length      int
 	Name        string
+
+	PieceMgr *piece.Manager
+
+	peerQueue chan *ManagedPeer
+	done      chan struct{}
 }
 
 type pieceWork struct {
@@ -45,6 +50,8 @@ type pieceProgress struct {
 	downloaded int
 	requested  int
 	backlog    int
+
+	pieceMgr *piece.Manager
 }
 
 func (state *pieceProgress) readMessage() error {
@@ -66,20 +73,17 @@ func (state *pieceProgress) readMessage() error {
 
 	case message.MsgHave:
 		index, err := message.ParseHave(msg)
-
 		if err != nil {
 			return err
 		}
-
 		state.client.Bitfield.SetPiece(index)
+		state.pieceMgr.RegisterHave(index)
 
 	case message.MsgPiece:
 		n, err := message.ParsePiece(state.index, state.buf, msg)
-
 		if err != nil {
 			return err
 		}
-
 		state.downloaded += n
 		state.backlog--
 	}
@@ -87,29 +91,26 @@ func (state *pieceProgress) readMessage() error {
 	return nil
 }
 
-func attemptDownloadedPiece(c *client.Client, pw *pieceWork) ([]byte, error) {
+func attemptDownloadedPiece(c *client.Client, pw *pieceWork, pm *piece.Manager) ([]byte, error) {
 	state := pieceProgress{
-		index:  pw.index,
-		client: c,
-		buf:    make([]byte, pw.length),
+		index:    pw.index,
+		client:   c,
+		buf:      make([]byte, pw.length),
+		pieceMgr: pm,
 	}
 
 	c.Conn.SetDeadline(time.Now().Add(30 * time.Second))
 	defer c.Conn.SetDeadline(time.Time{})
 
 	for state.downloaded < pw.length {
-
 		if !state.client.Choked {
 			for state.backlog < MaxBacklog && state.requested < pw.length {
 				blockSize := MaxBlockSize
-
 				if pw.length-state.requested < blockSize {
 					blockSize = pw.length - state.requested
 				}
 
-				err := c.SendRequest(pw.index, state.requested, blockSize)
-
-				if err != nil {
+				if err := c.SendRequest(pw.index, state.requested, blockSize); err != nil {
 					return nil, err
 				}
 
@@ -118,8 +119,7 @@ func attemptDownloadedPiece(c *client.Client, pw *pieceWork) ([]byte, error) {
 			}
 		}
 
-		err := state.readMessage()
-		if err != nil {
+		if err := state.readMessage(); err != nil {
 			return nil, err
 		}
 	}
@@ -130,115 +130,109 @@ func attemptDownloadedPiece(c *client.Client, pw *pieceWork) ([]byte, error) {
 func checkIntegrity(pw *pieceWork, buf []byte) error {
 	hash := sha1.Sum(buf)
 	if !bytes.Equal(hash[:], pw.hash[:]) {
-		return fmt.Errorf("Index %d failed integrity check", pw.hash)
+		return fmt.Errorf("piece %d failed integrity check", pw.index)
 	}
-
 	return nil
 }
 
-func (t *Torrent) calculateBoundForPiece(index int) (begin int, end int) {
-
-	begin = index * t.PieceLength
-	end = begin + t.PieceLength
-
-	if end > t.Length {
-		end = t.Length
-	}
-
-	return begin, end
-}
-
-func (t *Torrent) calculatePieceSize(index int) int {
-	begin, end := t.calculateBoundForPiece(index)
-	return end - begin
-}
-
 func (t *Torrent) Download() ([]byte, error) {
+	t.PieceMgr = piece.New(t.PieceHashes, t.PieceLength, t.Length)
+	if len(t.Peers) == 0 {
+		return nil, fmt.Errorf("no peers available from tracker")
+	}
+	log.Printf("Starting download for %s\n", t.Name)
 
-	log.Printf("Starting download for", t.Name)
-
-	workQueue := make(chan *pieceWork, len(t.PieceHashes))
 	results := make(chan *pieceResult)
+	t.peerQueue = make(chan *ManagedPeer, 64)
+	t.done = make(chan struct{})
 
-	for index, hash := range t.PieceHashes {
-		length := t.calculatePieceSize(index)
-		workQueue <- &pieceWork{index, hash, length}
-	}
-
-	for index, hash := range t.PieceHashes {
-		length := t.calculatePieceSize(index)
-		workQueue <- &pieceWork{index, hash, length}
-	}
-
-	peerQueue := make(chan *ManagedPeer, len(t.Peers))
 	for _, p := range t.Peers {
-		peerQueue <- &ManagedPeer{
+		t.peerQueue <- &ManagedPeer{
 			Peer:  p,
 			State: PeerNew,
 		}
 	}
+	// close(peerQueue)
 
 	const MaxWorkers = 5
 	workerDone := make(chan struct{})
 
 	for i := 0; i < MaxWorkers; i++ {
-		go t.worker(peerQueue, workQueue, results, workerDone)
+		go t.worker(results, workerDone)
 	}
 
 	buf := make([]byte, t.Length)
 	donePieces := 0
 	activeWorkers := MaxWorkers
-	// badPeers := 0
-	// totalPeers := len(t.Peers)
 
 	for donePieces < len(t.PieceHashes) {
 		select {
 		case res := <-results:
-			begin, end := t.calculateBoundForPiece(res.index)
+			begin := res.index * t.PieceLength
+			end := begin + len(res.buf)
 			copy(buf[begin:end], res.buf)
+
 			donePieces++
 			percent := float64(donePieces) / float64(len(t.PieceHashes)) * 100
-			numWorkers := runtime.NumGoroutine() - 1
-			log.Printf("(%0.2f%%) Downloaded piece #%d from %d peers\n", percent, res.index, numWorkers)
+			log.Printf("(%0.2f%%) Downloaded piece #%d (%d goroutines)\n",
+				percent, res.index, runtime.NumGoroutine()-1)
+
 		case <-workerDone:
 			activeWorkers--
 			log.Printf("Worker exited, remaining: %d\n", activeWorkers)
-
 			if activeWorkers == 0 {
-				return nil, fmt.Errorf("Download failed: no active peers left")
+				return nil, fmt.Errorf("download failed: no active peers left")
 			}
 		}
 	}
 
-	close(workQueue)
-
+	close(t.done)
 	return buf, nil
 }
 
 func (t *Torrent) downloadWithClient(
-	c *client.Client, workQueue chan *pieceWork, results chan *pieceResult,
+	c *client.Client,
+	results chan *pieceResult,
 ) error {
-	for pw := range workQueue {
-		if !c.Bitfield.HasPiece(pw.index) {
-			workQueue <- pw
-			continue
+
+	for {
+		pw := t.PieceMgr.NextPiece(c.Bitfield.HasPiece)
+		if pw == nil {
+			return nil
 		}
 
-		buf, err := attemptDownloadedPiece(c, pw)
+		buf, err := attemptDownloadedPiece(c, &pieceWork{
+			index:  pw.Index,
+			hash:   pw.Hash,
+			length: pw.Length,
+		},
+			t.PieceMgr,
+		)
 		if err != nil {
-			workQueue <- pw
+			t.PieceMgr.MarkFailed(pw.Index)
 			return err
 		}
 
-		err = checkIntegrity(pw, buf)
-		if err != nil {
-			workQueue <- pw
+		if err := checkIntegrity(&pieceWork{
+			index: pw.Index,
+			hash:  pw.Hash,
+		}, buf); err != nil {
+			t.PieceMgr.MarkFailed(pw.Index)
 			continue
 		}
 
-		c.SendHave(pw.index)
-		results <- &pieceResult{pw.index, buf}
+		t.PieceMgr.MarkDone(pw.Index)
+		c.SendHave(pw.Index)
+		results <- &pieceResult{pw.Index, buf}
 	}
+}
 
-	return nil
+func (t *Torrent) AddPeers(newPeers []peers.Peer) {
+	for _, p := range newPeers {
+		mp := &ManagedPeer{
+			Peer:  p,
+			State: PeerNew,
+		}
+		t.peerQueue <- mp
+	}
 }
