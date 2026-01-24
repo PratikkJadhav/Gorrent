@@ -3,6 +3,7 @@ package p2p
 import (
 	"bytes"
 	"crypto/sha1"
+	"errors"
 	"fmt"
 	"log"
 	"runtime"
@@ -53,6 +54,8 @@ type pieceProgress struct {
 
 	pieceMgr *piece.Manager
 }
+
+var ErrNoWork = errors.New("no more pieces available")
 
 func (state *pieceProgress) readMessage() error {
 	msg, err := state.client.Read()
@@ -142,7 +145,7 @@ func (t *Torrent) Download() ([]byte, error) {
 	}
 	log.Printf("Starting download for %s\n", t.Name)
 
-	results := make(chan *pieceResult)
+	results := make(chan *pieceResult, 16)
 	t.peerQueue = make(chan *ManagedPeer, 64)
 	t.done = make(chan struct{})
 
@@ -166,6 +169,10 @@ func (t *Torrent) Download() ([]byte, error) {
 	activeWorkers := MaxWorkers
 
 	for donePieces < len(t.PieceHashes) {
+		if !t.PieceMgr.HasPendingWork() && activeWorkers == 0 {
+			close(t.done)
+			return nil, fmt.Errorf("download stalled: no peers have remaining pieces")
+		}
 		select {
 		case res := <-results:
 			begin := res.index * t.PieceLength
@@ -187,6 +194,7 @@ func (t *Torrent) Download() ([]byte, error) {
 	}
 
 	close(t.done)
+	close(t.peerQueue)
 	return buf, nil
 }
 
@@ -198,7 +206,7 @@ func (t *Torrent) downloadWithClient(
 	for {
 		pw := t.PieceMgr.NextPiece(c.Bitfield.HasPiece)
 		if pw == nil {
-			return nil
+			return ErrNoWork
 		}
 
 		buf, err := attemptDownloadedPiece(c, &pieceWork{

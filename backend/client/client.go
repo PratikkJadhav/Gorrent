@@ -46,8 +46,8 @@ func completeHandshake(conn net.Conn, infohash, peerID [20]byte) (*handshake.Han
 // - bitfield is received OR
 // - a non-bitfield message arrives
 func recvInitialMessages(conn net.Conn, numPieces int) (bitfield.Bitfield, error) {
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
-	defer conn.SetDeadline(time.Time{})
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
 
 	bf := bitfield.New(numPieces)
 

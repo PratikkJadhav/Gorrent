@@ -16,12 +16,18 @@ func (t *Torrent) worker(
 
 	for {
 		select {
-		case mp := <-t.peerQueue:
+		case mp, ok := <-t.peerQueue:
+			if !ok {
+				return
+			}
 			if mp == nil {
 				continue
 			}
 
 			err := t.tryPeer(mp, results)
+			if err == ErrNoWork {
+				return
+			}
 			if err != nil {
 				mp.Failures++
 				if mp.ShouldRetry() {
@@ -32,13 +38,15 @@ func (t *Torrent) worker(
 				continue
 			}
 
-			go func(mp *ManagedPeer) {
-				time.Sleep(2 * time.Second)
-				select {
-				case t.peerQueue <- mp:
-				case <-t.done:
-				}
-			}(mp)
+			if mp.State == PeerActive {
+				go func(mp *ManagedPeer) {
+					time.Sleep(2 * time.Second)
+					select {
+					case t.peerQueue <- mp:
+					case <-t.done:
+					}
+				}(mp)
+			}
 
 		case <-t.done:
 			return

@@ -92,7 +92,6 @@ func (m *Manager) NextPiece(hasPiece func(index int) bool) *Piece {
 		}
 	}
 
-	// 2️⃣ BOOTSTRAP: no rarity info yet
 	if selected == nil {
 		for _, p := range m.pieces {
 			if p.State == Missing && hasPiece(p.Index) {
@@ -157,4 +156,16 @@ func (m *Manager) remainingPieces() int {
 		}
 	}
 	return count
+}
+
+func (m *Manager) HasPendingWork() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, p := range m.pieces {
+		if p.State == Missing {
+			return true
+		}
+	}
+	return false
 }
