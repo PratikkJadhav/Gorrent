@@ -14,9 +14,9 @@ import (
 )
 
 type bencodeTrackerResp struct {
-	Interval      int         `bencode:"interval"`
-	Peers         interface{} `bencode:"peers"`
-	FailureReason string      `bencode:"failure reason"`
+	Interval      int    `bencode:"interval"`
+	Peers         string `bencode:"peers"`
+	FailureReason string `bencode:"failure reason"`
 }
 
 func percentEncode(b []byte) string {
@@ -58,6 +58,9 @@ func (t *TorrentFile) requestPeers(trackerURL string, peerID [20]byte, port uint
 		return nil, err
 	}
 
+	if strings.HasPrefix(trackerURL, "udp:") {
+		return nil, fmt.Errorf("udp protocol not supported")
+	}
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 	}
@@ -67,7 +70,7 @@ func (t *TorrentFile) requestPeers(trackerURL string, peerID [20]byte, port uint
 		return nil, err
 	}
 
-	req.Header.Set("User-Agent", "Gorrent/0.1")
+	req.Header.Set("User-Agent", "qBittorrent/4.6.0")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -88,37 +91,8 @@ func (t *TorrentFile) requestPeers(trackerURL string, peerID [20]byte, port uint
 		return nil, fmt.Errorf("tracker failure: %s", trackerResp.FailureReason)
 	}
 
-	switch v := trackerResp.Peers.(type) {
-
-	case []byte:
-		// Compact peers (binary)
-		return peers.Unmarshal(v)
-
-	case string:
-		// Compact peers, but decoded as string by bencode-go
-		return peers.Unmarshal([]byte(v))
-
-	case []interface{}:
-		// Non-compact peers
-		return UnmarshalDict(v)
-
-	case []map[string]interface{}:
-		// Non-compact peers (bencode-go variant)
-		var list []interface{}
-		for _, m := range v {
-			list = append(list, m)
-		}
-		return UnmarshalDict(list)
-
-	case nil:
-		return nil, fmt.Errorf("tracker did not return peers")
-
-	default:
-		return nil, fmt.Errorf("unknown peers format from tracker: %T", v)
-	}
-
+	return peers.Unmarshal([]byte(trackerResp.Peers))
 }
-
 func (t *TorrentFile) requestPeersFromTrackers(
 	peerID [20]byte,
 	port uint16,

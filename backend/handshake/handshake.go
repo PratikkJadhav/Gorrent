@@ -13,7 +13,7 @@ type Handshake struct {
 
 func New(infoHash, peerID [20]byte) *Handshake {
 	return &Handshake{
-		Pstr:     "BitTorrent Protocol",
+		Pstr:     "BitTorrent protocol",
 		InfoHash: infoHash,
 		PeerID:   peerID,
 	}

@@ -6,16 +6,18 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"log"
+	"net"
 	"os"
 
 	"github.com/PratikkJadhav/Gorrent/backend/p2p"
+	"github.com/PratikkJadhav/Gorrent/backend/peers"
 	bencode "github.com/jackpal/bencode-go"
 )
 
-const port uint16 = 6881
+const port uint16 = 55555
 
 type TorrentFile struct {
-	Announce     string
+	Announce     string `bencode:"announce"`
 	AnnounceList [][]string
 	InfoHash     [20]byte
 	PieceHashes  [][20]byte
@@ -39,19 +41,30 @@ type bencodeTorrent struct {
 
 func (t *TorrentFile) DownloadToFile(path string) error {
 	var peerID [20]byte
-	_, err := rand.Read(peerID[:])
+	const prefix = "-GR0001-"
+	copy(peerID[:], prefix)
+	_, err := rand.Read(peerID[len(prefix):])
 	if err != nil {
 		return err
 	}
 
-	peers, err := t.requestPeersFromTrackers(peerID, port)
+	peerList, err := t.requestPeersFromTrackers(peerID, port)
 	if err != nil {
 		log.Printf("tracker announce failed: %v\n", err)
-		peers = nil
+		peerList = nil
 	}
 
+	localPeer := peers.Peer{
+		IP:   net.ParseIP("127.0.0.1"),
+		Port: 12460,
+	}
+	peerList = append(peerList, localPeer)
+
+	log.Printf("Calculated InfoHash: %x", t.InfoHash)
+	log.Printf("Gorrent InfoHash: %x", t.InfoHash)
+
 	torrent := p2p.Torrent{
-		Peers:       peers,
+		Peers:       peerList,
 		PeerID:      peerID,
 		InfoHash:    t.InfoHash,
 		PieceHashes: t.PieceHashes,

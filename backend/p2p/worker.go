@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"log"
 	"time"
 
 	"github.com/PratikkJadhav/Gorrent/backend/client"
@@ -9,6 +10,7 @@ import (
 func (t *Torrent) worker(
 	results chan *pieceResult,
 	workerDone chan struct{},
+	peerDropped chan struct{},
 ) {
 	defer func() {
 		workerDone <- struct{}{}
@@ -20,21 +22,20 @@ func (t *Torrent) worker(
 			if !ok {
 				return
 			}
-			if mp == nil {
-				continue
-			}
 
 			err := t.tryPeer(mp, results)
-			if err == ErrNoWork {
-				return
-			}
 			if err != nil {
 				mp.Failures++
+				// Log the error but keep it short
+				// log.Printf("Peer %s failed: %s", mp.Peer.IP, err)
+
 				if mp.ShouldRetry() {
 					time.Sleep(mp.BackoffDuration())
 					t.peerQueue <- mp
+				} else {
+					log.Printf("Dropping peer %s after 3 failures", mp.Peer.IP)
+					peerDropped <- struct{}{}
 				}
-
 				continue
 			}
 

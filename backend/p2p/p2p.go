@@ -3,11 +3,9 @@ package p2p
 import (
 	"bytes"
 	"crypto/sha1"
-	"errors"
 	"fmt"
 	"log"
 	"runtime"
-	"time"
 
 	"github.com/PratikkJadhav/Gorrent/backend/client"
 	"github.com/PratikkJadhav/Gorrent/backend/message"
@@ -55,7 +53,7 @@ type pieceProgress struct {
 	pieceMgr *piece.Manager
 }
 
-var ErrNoWork = errors.New("no more pieces available")
+var ErrNoWork = fmt.Errorf("no more pieces available") // Fixed error definition
 
 func (state *pieceProgress) readMessage() error {
 	msg, err := state.client.Read()
@@ -102,8 +100,8 @@ func attemptDownloadedPiece(c *client.Client, pw *pieceWork, pm *piece.Manager) 
 		pieceMgr: pm,
 	}
 
-	c.Conn.SetDeadline(time.Now().Add(30 * time.Second))
-	defer c.Conn.SetDeadline(time.Time{})
+	// c.Conn.SetDeadline(time.Now().Add(30 * time.Second))
+	// defer c.Conn.SetDeadline(time.Time{})
 
 	for state.downloaded < pw.length {
 		if !state.client.Choked {
@@ -145,8 +143,12 @@ func (t *Torrent) Download() ([]byte, error) {
 	}
 	log.Printf("Starting download for %s\n", t.Name)
 
-	results := make(chan *pieceResult, 16)
-	t.peerQueue = make(chan *ManagedPeer, 64)
+	results := make(chan *pieceResult) // Unbuffered is fine for results
+
+	// 1. BUFFERED CHANNELS to prevent blocking
+	t.peerQueue = make(chan *ManagedPeer, len(t.Peers))
+	peerDropped := make(chan struct{}, len(t.Peers)) // Huge buffer so workers never block
+
 	t.done = make(chan struct{})
 
 	for _, p := range t.Peers {
@@ -155,24 +157,25 @@ func (t *Torrent) Download() ([]byte, error) {
 			State: PeerNew,
 		}
 	}
-	// close(peerQueue)
 
-	const MaxWorkers = 5
+	const MaxWorkers = 50
 	workerDone := make(chan struct{})
 
 	for i := 0; i < MaxWorkers; i++ {
-		go t.worker(results, workerDone)
+		go t.worker(results, workerDone, peerDropped)
 	}
 
 	buf := make([]byte, t.Length)
 	donePieces := 0
 	activeWorkers := MaxWorkers
+	alivePeers := len(t.Peers)
 
 	for donePieces < len(t.PieceHashes) {
 		if !t.PieceMgr.HasPendingWork() && activeWorkers == 0 {
 			close(t.done)
 			return nil, fmt.Errorf("download stalled: no peers have remaining pieces")
 		}
+
 		select {
 		case res := <-results:
 			begin := res.index * t.PieceLength
@@ -184,11 +187,23 @@ func (t *Torrent) Download() ([]byte, error) {
 			log.Printf("(%0.2f%%) Downloaded piece #%d (%d goroutines)\n",
 				percent, res.index, runtime.NumGoroutine()-1)
 
+		case <-peerDropped:
+			alivePeers--
+			// Debug log to see the countdown
+			if alivePeers%5 == 0 || alivePeers < 5 {
+				log.Printf("[Debug] Peer dropped. Alive peers remaining: %d", alivePeers)
+			}
+
+			if alivePeers == 0 {
+				close(t.done)
+				return nil, fmt.Errorf("all peers failed to connect")
+			}
+
 		case <-workerDone:
 			activeWorkers--
 			log.Printf("Worker exited, remaining: %d\n", activeWorkers)
-			if activeWorkers == 0 {
-				return nil, fmt.Errorf("download failed: no active peers left")
+			if activeWorkers == 0 && alivePeers == 0 {
+				return nil, fmt.Errorf("download failed: no active workers or peers left")
 			}
 		}
 	}

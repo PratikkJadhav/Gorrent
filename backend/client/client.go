@@ -22,7 +22,7 @@ type Client struct {
 }
 
 func completeHandshake(conn net.Conn, infohash, peerID [20]byte) (*handshake.Handshake, error) {
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
 	defer conn.SetDeadline(time.Time{})
 
 	req := handshake.New(infohash, peerID)
@@ -46,7 +46,7 @@ func completeHandshake(conn net.Conn, infohash, peerID [20]byte) (*handshake.Han
 // - bitfield is received OR
 // - a non-bitfield message arrives
 func recvInitialMessages(conn net.Conn, numPieces int) (bitfield.Bitfield, error) {
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	defer conn.SetReadDeadline(time.Time{})
 
 	bf := bitfield.New(numPieces)
@@ -80,7 +80,7 @@ func recvInitialMessages(conn net.Conn, numPieces int) (bitfield.Bitfield, error
 }
 
 func New(peer peers.Peer, peerID, infoHash [20]byte, numPieces int) (*Client, error) {
-	conn, err := net.DialTimeout("tcp", peer.String(), 3*time.Second)
+	conn, err := net.DialTimeout("tcp4", peer.String(), 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
