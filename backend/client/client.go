@@ -19,6 +19,9 @@ type Client struct {
 	peer     peers.Peer
 	infoHash [20]byte
 	peerID   [20]byte
+
+	TotalRead   int64
+	PayloadRead int64
 }
 
 func completeHandshake(conn net.Conn, infohash, peerID [20]byte) (*handshake.Handshake, error) {
@@ -73,7 +76,7 @@ func recvInitialMessages(conn net.Conn, numPieces int) (bitfield.Bitfield, error
 			bf.SetPiece(index)
 
 		default:
-			// First non-bitfield message → assume no bitfield
+
 			return bf, nil
 		}
 	}
@@ -105,7 +108,7 @@ func New(peer peers.Peer, peerID, infoHash [20]byte, numPieces int) (*Client, er
 		peerID:   peerID,
 	}
 
-	// 🔑 CRITICAL: tell peer we are interested
+	// tell peer we are interested
 	if hasAnyPiece(bf) {
 		if err := c.SendInterested(); err != nil {
 			conn.Close()
@@ -126,7 +129,18 @@ func hasAnyPiece(bf bitfield.Bitfield) bool {
 }
 
 func (c *Client) Read() (*message.Message, error) {
-	return message.Read(c.Conn)
+	msg, err := message.Read(c.Conn)
+	if err != nil {
+		return nil, err
+	}
+
+	if msg == nil {
+		c.TotalRead += 4
+	} else {
+		c.TotalRead += int64(len(msg.Serialize()))
+	}
+
+	return msg, nil
 }
 
 func (c *Client) SendRequest(index, begin, length int) error {

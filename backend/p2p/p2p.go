@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"fmt"
+	"io"
 	"log"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/PratikkJadhav/Gorrent/backend/client"
 	"github.com/PratikkJadhav/Gorrent/backend/message"
@@ -29,6 +31,9 @@ type Torrent struct {
 
 	peerQueue chan *ManagedPeer
 	done      chan struct{}
+
+	TotalRead   int64
+	PayloadRead int64
 }
 
 type pieceWork struct {
@@ -51,15 +56,24 @@ type pieceProgress struct {
 	backlog    int
 
 	pieceMgr *piece.Manager
+	torrent  *Torrent
 }
 
-var ErrNoWork = fmt.Errorf("no more pieces available") // Fixed error definition
+var ErrNoWork = fmt.Errorf("no more pieces available")
 
 func (state *pieceProgress) readMessage() error {
 	msg, err := state.client.Read()
 	if err != nil {
 		return err
 	}
+
+	var wireSize int64
+	if msg == nil {
+		wireSize = 4
+	} else {
+		wireSize = int64(len(msg.Serialize()))
+	}
+	atomic.AddInt64(&state.torrent.TotalRead, wireSize)
 
 	if msg == nil {
 		return nil
@@ -68,10 +82,8 @@ func (state *pieceProgress) readMessage() error {
 	switch msg.ID {
 	case message.MsgUnchoke:
 		state.client.Choked = false
-
 	case message.MsgChoke:
 		state.client.Choked = true
-
 	case message.MsgHave:
 		index, err := message.ParseHave(msg)
 		if err != nil {
@@ -79,12 +91,12 @@ func (state *pieceProgress) readMessage() error {
 		}
 		state.client.Bitfield.SetPiece(index)
 		state.pieceMgr.RegisterHave(index)
-
 	case message.MsgPiece:
 		n, err := message.ParsePiece(state.index, state.buf, msg)
 		if err != nil {
 			return err
 		}
+		atomic.AddInt64(&state.torrent.PayloadRead, int64(n))
 		state.downloaded += n
 		state.backlog--
 	}
@@ -92,16 +104,14 @@ func (state *pieceProgress) readMessage() error {
 	return nil
 }
 
-func attemptDownloadedPiece(c *client.Client, pw *pieceWork, pm *piece.Manager) ([]byte, error) {
+func (t *Torrent) attemptDownloadedPiece(c *client.Client, pw *pieceWork) ([]byte, error) {
 	state := pieceProgress{
 		index:    pw.index,
 		client:   c,
 		buf:      make([]byte, pw.length),
-		pieceMgr: pm,
+		pieceMgr: t.PieceMgr,
+		torrent:  t,
 	}
-
-	// c.Conn.SetDeadline(time.Now().Add(30 * time.Second))
-	// defer c.Conn.SetDeadline(time.Time{})
 
 	for state.downloaded < pw.length {
 		if !state.client.Choked {
@@ -136,18 +146,17 @@ func checkIntegrity(pw *pieceWork, buf []byte) error {
 	return nil
 }
 
-func (t *Torrent) Download() ([]byte, error) {
+func (t *Torrent) Download(out io.WriterAt) error {
 	t.PieceMgr = piece.New(t.PieceHashes, t.PieceLength, t.Length)
 	if len(t.Peers) == 0 {
-		return nil, fmt.Errorf("no peers available from tracker")
+		return fmt.Errorf("no peers available from tracker")
 	}
 	log.Printf("Starting download for %s\n", t.Name)
 
-	results := make(chan *pieceResult) // Unbuffered is fine for results
+	results := make(chan *pieceResult)
 
-	// 1. BUFFERED CHANNELS to prevent blocking
 	t.peerQueue = make(chan *ManagedPeer, len(t.Peers))
-	peerDropped := make(chan struct{}, len(t.Peers)) // Huge buffer so workers never block
+	peerDropped := make(chan struct{}, len(t.Peers))
 
 	t.done = make(chan struct{})
 
@@ -165,7 +174,6 @@ func (t *Torrent) Download() ([]byte, error) {
 		go t.worker(results, workerDone, peerDropped)
 	}
 
-	buf := make([]byte, t.Length)
 	donePieces := 0
 	activeWorkers := MaxWorkers
 	alivePeers := len(t.Peers)
@@ -173,14 +181,15 @@ func (t *Torrent) Download() ([]byte, error) {
 	for donePieces < len(t.PieceHashes) {
 		if !t.PieceMgr.HasPendingWork() && activeWorkers == 0 {
 			close(t.done)
-			return nil, fmt.Errorf("download stalled: no peers have remaining pieces")
+			return fmt.Errorf("download stalled: no peers have remaining pieces")
 		}
 
 		select {
 		case res := <-results:
-			begin := res.index * t.PieceLength
-			end := begin + len(res.buf)
-			copy(buf[begin:end], res.buf)
+			begin := int64(res.index * t.PieceLength)
+			if _, err := out.WriteAt(res.buf, begin); err != nil {
+				return err
+			}
 
 			donePieces++
 			percent := float64(donePieces) / float64(len(t.PieceHashes)) * 100
@@ -189,48 +198,57 @@ func (t *Torrent) Download() ([]byte, error) {
 
 		case <-peerDropped:
 			alivePeers--
-			// Debug log to see the countdown
 			if alivePeers%5 == 0 || alivePeers < 5 {
 				log.Printf("[Debug] Peer dropped. Alive peers remaining: %d", alivePeers)
 			}
 
 			if alivePeers == 0 {
 				close(t.done)
-				return nil, fmt.Errorf("all peers failed to connect")
+				return fmt.Errorf("all peers failed to connect")
 			}
 
 		case <-workerDone:
 			activeWorkers--
 			log.Printf("Worker exited, remaining: %d\n", activeWorkers)
 			if activeWorkers == 0 && alivePeers == 0 {
-				return nil, fmt.Errorf("download failed: no active workers or peers left")
+				return fmt.Errorf("download failed: no active workers or peers left")
 			}
+
 		}
 	}
 
 	close(t.done)
 	close(t.peerQueue)
-	return buf, nil
+	t.GetStats()
+	return nil
 }
 
-func (t *Torrent) downloadWithClient(
-	c *client.Client,
-	results chan *pieceResult,
-) error {
+func (t *Torrent) GetStats() {
+	total := atomic.LoadInt64(&t.TotalRead)
+	payload := atomic.LoadInt64(&t.PayloadRead)
 
+	if total == 0 {
+		fmt.Println("No data transferred yet.")
+		return
+	}
+
+	overhead := float64(total-payload) / float64(total) * 100
+	fmt.Printf("Total Bytes: %d, Payload: %d\n", total, payload)
+	fmt.Printf("Protocol Overhead: %.2f%%\n", overhead)
+}
+
+func (t *Torrent) downloadWithClient(c *client.Client, results chan *pieceResult) error {
 	for {
 		pw := t.PieceMgr.NextPiece(c.Bitfield.HasPiece)
 		if pw == nil {
 			return ErrNoWork
 		}
 
-		buf, err := attemptDownloadedPiece(c, &pieceWork{
+		buf, err := t.attemptDownloadedPiece(c, &pieceWork{
 			index:  pw.Index,
 			hash:   pw.Hash,
 			length: pw.Length,
-		},
-			t.PieceMgr,
-		)
+		})
 		if err != nil {
 			t.PieceMgr.MarkFailed(pw.Index)
 			return err

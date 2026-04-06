@@ -60,8 +60,15 @@ func (t *TorrentFile) DownloadToFile(path string) error {
 	}
 	peerList = append(peerList, localPeer)
 
-	log.Printf("Calculated InfoHash: %x", t.InfoHash)
-	log.Printf("Gorrent InfoHash: %x", t.InfoHash)
+	outFile, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	if err := outFile.Truncate(int64(t.Length)); err != nil {
+		return err
+	}
 
 	torrent := p2p.Torrent{
 		Peers:       peerList,
@@ -73,23 +80,7 @@ func (t *TorrentFile) DownloadToFile(path string) error {
 		Name:        t.Name,
 	}
 
-	buf, err := torrent.Download()
-	if err != nil {
-		return err
-	}
-
-	outFile, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-
-	defer outFile.Close()
-	_, err = outFile.Write(buf)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return torrent.Download(outFile)
 }
 
 func Open(path string) (TorrentFile, error) {
@@ -97,53 +88,38 @@ func Open(path string) (TorrentFile, error) {
 	if err != nil {
 		return TorrentFile{}, err
 	}
-
 	defer file.Close()
 
-	bencodetorrent := bencodeTorrent{}
-	err = bencode.Unmarshal(file, &bencodetorrent)
+	// 1. Decode generic map to calculate the exact InfoHash without nil interfaces
+	data, err := bencode.Decode(file)
 	if err != nil {
 		return TorrentFile{}, err
 	}
 
-	return bencodetorrent.toTorrentFile()
-}
-
-func (i *bencodeInfo) hash() ([20]byte, error) {
-	var buf bytes.Buffer
-	err := bencode.Marshal(&buf, *i)
-	if err != nil {
-		return [20]byte{}, err
+	dict, ok := data.(map[string]interface{})
+	if !ok {
+		return TorrentFile{}, fmt.Errorf("invalid torrent file format")
 	}
 
-	h := sha1.Sum(buf.Bytes())
-	return h, nil
-}
-
-func (i *bencodeInfo) splitPieceHashes() ([][20]byte, error) {
-	hashLen := 20
-	buf := []byte(i.Pieces)
-	if len(buf)%hashLen != 0 {
-		err := fmt.Errorf("Received curropted pieces of lenght %d", len(buf))
-		return nil, err
+	infoDict, ok := dict["info"]
+	if !ok {
+		return TorrentFile{}, fmt.Errorf("missing info dictionary")
 	}
 
-	numHashes := len(buf) / hashLen
-	hashes := make([][20]byte, numHashes)
-
-	for i := 0; i < numHashes; i++ {
-		copy(hashes[i][:], buf[i*hashLen:(i+1)*hashLen])
+	var infoBuf bytes.Buffer
+	if err := bencode.Marshal(&infoBuf, infoDict); err != nil {
+		return TorrentFile{}, err
 	}
+	infoHash := sha1.Sum(infoBuf.Bytes())
 
-	return hashes, nil
-}
-
-func (bto *bencodeTorrent) toTorrentFile() (TorrentFile, error) {
-	infoHash, err := bto.Info.hash()
-	if err != nil {
+	// 2. Reset file pointer and unmarshal into our typed struct for ease of use
+	file.Seek(0, 0)
+	bto := bencodeTorrent{}
+	if err := bencode.Unmarshal(file, &bto); err != nil {
 		return TorrentFile{}, err
 	}
 
+	// 3. Extract the rest
 	pieceHashes, err := bto.Info.splitPieceHashes()
 	if err != nil {
 		return TorrentFile{}, err
@@ -160,4 +136,22 @@ func (bto *bencodeTorrent) toTorrentFile() (TorrentFile, error) {
 	}
 
 	return t, nil
+}
+
+func (i *bencodeInfo) splitPieceHashes() ([][20]byte, error) {
+	hashLen := 20
+	buf := []byte(i.Pieces)
+	if len(buf)%hashLen != 0 {
+		err := fmt.Errorf("Received corrupted pieces of length %d", len(buf))
+		return nil, err
+	}
+
+	numHashes := len(buf) / hashLen
+	hashes := make([][20]byte, numHashes)
+
+	for i := 0; i < numHashes; i++ {
+		copy(hashes[i][:], buf[i*hashLen:(i+1)*hashLen])
+	}
+
+	return hashes, nil
 }

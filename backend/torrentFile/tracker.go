@@ -34,38 +34,41 @@ func percentEncode(b []byte) string {
 	return sb.String()
 }
 
-func (t *TorrentFile) buildTrackerURL(peerID [20]byte, port uint16) (string, error) {
-	base, err := url.Parse(t.Announce)
+func (t *TorrentFile) buildTrackerURL(trackerURL string, peerID [20]byte, port uint16) (string, error) {
+	base, err := url.Parse(trackerURL)
 	if err != nil {
 		return "", err
 	}
 
-	query := fmt.Sprintf(
-		"info_hash=%s&peer_id=%s&port=%d&uploaded=0&downloaded=0&left=%d&compact=1",
-		percentEncode(t.InfoHash[:]),
-		percentEncode(peerID[:]),
-		port,
-		t.Length,
-	)
+	query := url.Values{
+		"info_hash":  []string{string(t.InfoHash[:])},
+		"peer_id":    []string{string(peerID[:])},
+		"port":       []string{fmt.Sprintf("%d", port)},
+		"uploaded":   []string{"0"},
+		"downloaded": []string{"0"},
+		"left":       []string{fmt.Sprintf("%d", t.Length)},
+		"compact":    []string{"1"},
+	}
 
-	base.RawQuery = query
+	base.RawQuery = query.Encode()
 	return base.String(), nil
 }
 
 func (t *TorrentFile) requestPeers(trackerURL string, peerID [20]byte, port uint16) ([]peers.Peer, error) {
-	trackerURL, err := t.buildTrackerURL(peerID, port)
+	fullURL, err := t.buildTrackerURL(trackerURL, peerID, port)
 	if err != nil {
 		return nil, err
 	}
 
-	if strings.HasPrefix(trackerURL, "udp:") {
+	if strings.HasPrefix(fullURL, "udp:") {
 		return nil, fmt.Errorf("udp protocol not supported")
 	}
+
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 	}
 
-	req, err := http.NewRequest("GET", trackerURL, nil)
+	req, err := http.NewRequest("GET", fullURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -93,13 +96,13 @@ func (t *TorrentFile) requestPeers(trackerURL string, peerID [20]byte, port uint
 
 	return peers.Unmarshal([]byte(trackerResp.Peers))
 }
+
 func (t *TorrentFile) requestPeersFromTrackers(
 	peerID [20]byte,
 	port uint16,
 ) ([]peers.Peer, error) {
 
 	var lastErr error
-
 	var tiers [][]string
 
 	if len(t.AnnounceList) > 0 {
