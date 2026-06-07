@@ -25,7 +25,7 @@ func (h *Handshake) Serialize() []byte {
 	buf := make([]byte, bufLen)
 	buf[0] = byte(pstrlen)
 	copy(buf[1:], h.Pstr)
-	//Leave 8 reserved bytes
+	//Leave 8 reserved bytes for protocols like DHT and all
 	copy(buf[1+pstrlen+8:], h.InfoHash[:])
 	copy(buf[1+pstrlen+8+20:], h.PeerID[:])
 	return buf

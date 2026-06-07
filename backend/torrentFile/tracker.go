@@ -59,7 +59,7 @@ func (t *TorrentFile) requestPeers(trackerURL string, peerID [20]byte, port uint
 	if err != nil {
 		return nil, err
 	}
-
+	//we do not support udp as of now
 	if strings.HasPrefix(fullURL, "udp:") {
 		return nil, fmt.Errorf("udp protocol not supported")
 	}
